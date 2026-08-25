@@ -1,0 +1,35 @@
+# One archive per platform carrying every module this repo builds, so a single
+# `plst install` registers all of them without a Go toolchain.
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: harness
+    main: ./cmd/plst-harness
+    binary: plst-harness
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  # Every binary in one archive. plst picks the plst-* entries out of it, so a
+  # module added to this repo later needs nothing here but a build block.
+  - name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [README.md, LICENSE*]
+
+checksums:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  filters:
+    exclude: ["^docs:", "^test:", "^chore:"]
+
+release:
+  prerelease: auto
