@@ -1,0 +1,28 @@
+# Every tool version this project uses lives here. No `latest` anywhere: two
+# machines that run `mise install` a month apart get the same toolchain, so a
+# difference in behavior between them is never the tooling.
+
+[tools]
+go = "1.27.0"
+golangci-lint = "2.13.1"
+
+[tasks.build]
+description = "Build every module into ./bin"
+run = "go build -o bin/ ./cmd/..."
+
+[tasks.install]
+description = "Build every module into plst's module directory"
+# PLST_MODULE_DIR if plst says where, the default if not. Nothing here decides
+# the location: plst owns that, and this task only has to agree with it.
+run = """
+dir="${PLST_MODULE_DIR:-${PLST_HOME:-$HOME/.plasticity}/modules}"
+mkdir -p "$dir"
+go build -ldflags "-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o "$dir/" ./cmd/...
+echo "installed into $dir"
+"""
+
+[tasks.test]
+run = "go test ./..."
+
+[tasks.lint]
+run = "golangci-lint run"
