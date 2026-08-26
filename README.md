@@ -26,13 +26,16 @@ plst harness use rails                       # link it in
 plst harness use rails --project             # for this repository only
 plst harness off                             # put back what it displaced
 plst harness list
+
+plst harness pin esmarkowski/my-harness@v1   # record what this repository expects
+plst harness sync                            # install it, move to the ref, apply
 ```
 
 ### Layout
 
 ```
 rails/
-  harness.json     name, description, hook declarations
+  harness.json     name, description, link mode, hook declarations
   CLAUDE.md
   rules/           project scope only
   agents/
@@ -61,6 +64,42 @@ plan files, caches — and none of it is a harness's business.
 
 Anything real already at a component path is **moved aside, never deleted**, into
 `~/.plasticity/harnesses/.parked/`, and put back by `plst harness off`.
+
+### Merging into what is already there
+
+A directory component is linked **entry by entry**, so the directory itself stays
+real:
+
+```
+.claude/agents/reviewer-rails.md      the repository's own, committed, untouched
+.claude/agents/motion1-review.md  ->  ~/.plasticity/harnesses/motion1/agents/motion1-review.md
+```
+
+This is the default, and it is the difference between a harness a team can use and
+one only its author can. A repository commits agents, skills, and rules of its own;
+linking over the whole directory made every one of those files read as **deleted**
+in `git status`, so using a harness meant a dirty working tree and a symlink into
+someone's home directory one `git add -A` away from being committed.
+
+Only a **same-named** entry is still displaced, and git reports that as a
+typechange rather than a deletion. A dotted entry — the `.gitkeep` that carries an
+empty directory through git — is not linked at all: it is the harness's own
+bookkeeping, not something the agent reads.
+
+A harness that wants the old behaviour says so:
+
+```json
+{ "name": "mine", "link": "replace" }
+```
+
+`replace` links the directory itself and parks whatever was there. It is right for
+a personal harness at user scope, where what the harness provides should be exactly
+what the agent reads and anything left over is a surprise. It is wrong for a
+project's. An unrecognised value is refused rather than defaulted — the choice
+decides whether someone's committed files get moved aside, so it is not a thing to
+guess at.
+
+A file component has no entries and is always the whole of itself.
 
 ### Rules are project scope only
 
@@ -98,6 +137,52 @@ recorded, so `off` removes exactly that rather than guessing.
 
 Fields this program has never heard of — a `timeout`, a `statusMessage` — are
 passed through untouched.
+
+### Pinning one to a repository
+
+`use` records what it did in machine-local state, keyed by absolute path. That is
+enough for one person on one checkout and no use at all for a team: a fresh clone
+has no binding, two developers cannot be shown to be running the same
+configuration, and every git worktree is a different absolute path and therefore a
+separate scope — a repository with sixteen worktrees would need sixteen `use` runs.
+
+A pin is committed, so all of them inherit it:
+
+```json
+{
+  "harness": {
+    "source": "EnovisHCS/motion1-harness",
+    "ref": "v1.4.0"
+  }
+}
+```
+
+It lives in `plst.json`, the same file plst reads when a repository *provides*
+modules, under a different key: one file for a repository's relationship to plst,
+whichever direction it runs in. A second filename for the second meaning is how
+this gets confusing.
+
+```sh
+plst harness pin EnovisHCS/motion1-harness@v1.4.0   # writes it
+git add plst.json && git commit
+plst harness sync                                   # every other checkout
+```
+
+`sync` installs the harness if it is missing, moves it onto the pinned ref, and
+applies it at project scope. It is idempotent, so it belongs in `bin/setup`, a
+postinstall hook, and CI.
+
+**Pin a ref.** Without one, "the same harness" is not the same harness — one
+person running `update` moves ahead of everyone else and nothing says so. `pin`
+warns when you leave it out.
+
+A harness already installed under that name from a **different** source is
+refused, not used. That case would apply cleanly and be the wrong configuration,
+which is the exact thing a pin exists to prevent.
+
+Sources are not limited to github. `owner/repo` is normalised, and anything else
+git can clone — an ssh URL, a self-hosted remote, a local path — is taken as
+written, because a pin is where a company's own host shows up.
 
 ### Scopes
 

@@ -53,6 +53,10 @@ type Applied struct {
 	Dir     string    `json:"dir"`
 	At      time.Time `json:"at"`
 	Links   []Link    `json:"links,omitempty"`
+	// Dirs are directories this program created to hold entry links. Recorded so
+	// reverting can remove them, and only while they are empty: a directory
+	// someone has since put their own file in is theirs.
+	Dirs []string `json:"dirs,omitempty"`
 	// Commands are the expanded hook commands written into the settings file.
 	// Matched on the string when removing, not on position: an index shifts the
 	// moment anything else registers a hook.
