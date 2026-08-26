@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -59,6 +60,8 @@ func Use(name string, scope Scope, say func(string)) (Report, error) {
 	applied := Applied{Harness: h.Name, Dir: h.Dir, At: time.Now(), Settings: settings}
 	_, isProject := scope.IsProject()
 
+	merge := h.Manifest.Mode() == Merge
+
 	for _, c := range Components(h.Dir) {
 		if c.ProjectOnly && !isProject {
 			// Saying so rather than linking it: the link would be created, look
@@ -69,23 +72,75 @@ func Use(name string, scope Scope, say func(string)) (Report, error) {
 		path := filepath.Join(target, c.Name)
 		src := filepath.Join(h.Dir, c.Name)
 
-		link := Link{Path: path, Target: src}
-		parked, err := clear(path, stamp, scope)
+		// A file component is the whole of itself either way — there are no
+		// entries in a CLAUDE.md to merge.
+		if !c.Dir || !merge {
+			link := Link{Path: path, Target: src}
+			parked, err := clear(path, stamp, scope)
+			if err != nil {
+				return Report{}, err
+			}
+			if parked != "" {
+				link.Parked = parked
+				rep.Parked = append(rep.Parked, c.Name)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return Report{}, err
+			}
+			if err := os.Symlink(src, path); err != nil {
+				return Report{}, fmt.Errorf("link %s: %w", c.Name, err)
+			}
+			applied.Links = append(applied.Links, link)
+			rep.Linked = append(rep.Linked, c.Name)
+			continue
+		}
+
+		// Merging: the directory itself stays real and each entry is linked into
+		// it, so a repository's own committed agents and skills are still there
+		// and only a same-named entry is ever displaced.
+		entries, err := os.ReadDir(src)
 		if err != nil {
 			return Report{}, err
 		}
-		if parked != "" {
-			link.Parked = parked
-			rep.Parked = append(rep.Parked, c.Name)
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		container, created, err := realDir(path, stamp, scope)
+		if err != nil {
 			return Report{}, err
 		}
-		if err := os.Symlink(src, path); err != nil {
-			return Report{}, fmt.Errorf("link %s: %w", c.Name, err)
+		if created {
+			applied.Dirs = append(applied.Dirs, path)
 		}
-		applied.Links = append(applied.Links, link)
-		rep.Linked = append(rep.Linked, c.Name)
+		if container.Parked != "" {
+			rep.Parked = append(rep.Parked, c.Name)
+			applied.Links = append(applied.Links, container)
+		}
+
+		linked := 0
+		for _, e := range entries {
+			// A dotted entry is the harness's own bookkeeping — the .gitkeep that
+			// carries an empty directory through git, a .DS_Store — and not
+			// something the agent reads. Linking it in would be noise in someone
+			// else's repository.
+			if strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			name := filepath.Join(c.Name, e.Name())
+			entryPath := filepath.Join(path, e.Name())
+			link := Link{Path: entryPath, Target: filepath.Join(src, e.Name())}
+			parked, err := clear(entryPath, stamp, scope)
+			if err != nil {
+				return Report{}, err
+			}
+			if parked != "" {
+				link.Parked = parked
+				rep.Parked = append(rep.Parked, name)
+			}
+			if err := os.Symlink(link.Target, entryPath); err != nil {
+				return Report{}, fmt.Errorf("link %s: %w", name, err)
+			}
+			applied.Links = append(applied.Links, link)
+			linked++
+		}
+		rep.Linked = append(rep.Linked, fmt.Sprintf("%s (%d)", c.Name, linked))
 	}
 
 	cmds, err := registerHooks(settings, h)
@@ -117,10 +172,17 @@ func Off(scope Scope, say func(string)) (Report, error) {
 		return Report{}, err
 	}
 	rep := Report{Harness: prev.Harness, Scope: scope}
+	// Components for what was taken out, since a merged component is many links
+	// and naming each one says nothing. Full paths for what was restored, because
+	// there the individual file is the point.
+	seen := map[string]bool{}
 	for _, l := range prev.Links {
-		rep.Linked = append(rep.Linked, filepath.Base(l.Path))
+		if c := component(prev, l.Path); l.Target != "" && !seen[c] {
+			seen[c] = true
+			rep.Linked = append(rep.Linked, c)
+		}
 		if l.Parked != "" {
-			rep.Parked = append(rep.Parked, filepath.Base(l.Path))
+			rep.Parked = append(rep.Parked, relative(prev, l.Path))
 		}
 	}
 	return rep, nil
@@ -131,22 +193,42 @@ func Off(scope Scope, say func(string)) (Report, error) {
 // reverted one with a complaint, so it keeps going and reports at the end.
 func revert(state *State, scope Scope, a Applied) error {
 	var failed []string
+
+	// One: the links. Only a link this program made is removed — if the path is
+	// now a real directory, someone replaced it deliberately and it is not plst's
+	// to delete.
 	for _, l := range a.Links {
-		// Only a link this program made is removed. If the path is now a real
-		// directory, someone replaced it deliberately and it is not plst's to
-		// delete.
+		if l.Target == "" {
+			continue
+		}
 		if fi, err := os.Lstat(l.Path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 			if err := os.Remove(l.Path); err != nil {
 				failed = append(failed, l.Path)
-				continue
 			}
 		}
+	}
+
+	// Two: the directories created to hold those links, deepest first. os.Remove
+	// refuses a directory that is not empty, which is exactly the wanted rule: a
+	// directory someone has since put their own file in stays.
+	dirs := append([]string(nil), a.Dirs...)
+	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, d := range dirs {
+		_ = os.Remove(d)
+	}
+
+	// Three: what was moved aside, now that the paths it belongs at are free.
+	for _, l := range a.Links {
 		if l.Parked == "" {
 			continue
 		}
 		if _, err := os.Lstat(l.Path); err == nil {
 			// Something is in the way; leaving the parked copy where it is beats
 			// overwriting whatever that is.
+			failed = append(failed, l.Parked)
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(l.Path), 0o755); err != nil {
 			failed = append(failed, l.Parked)
 			continue
 		}
@@ -189,6 +271,57 @@ func clear(path, stamp string, scope Scope) (parked string, err error) {
 		return "", fmt.Errorf("move %s aside: %w", path, err)
 	}
 	return dest, nil
+}
+
+// realDir prepares a genuine directory at path for entry links to go into.
+//
+// Returns the Link to record when something had to be moved aside, and whether
+// the directory itself was created — reverting needs to know both, and they are
+// not the same question: a directory that was already there stays.
+func realDir(path, stamp string, scope Scope) (link Link, created bool, err error) {
+	fi, lerr := os.Lstat(path)
+	switch {
+	case os.IsNotExist(lerr):
+		return Link{Path: path}, true, os.MkdirAll(path, 0o755)
+	case lerr != nil:
+		return Link{}, false, lerr
+	case fi.Mode()&os.ModeSymlink != 0:
+		// A link left by a harness that replaced this component rather than
+		// merging into it. Taking it out and making a real directory is what
+		// switching to merge means.
+		if err := os.Remove(path); err != nil {
+			return Link{}, false, err
+		}
+		return Link{Path: path}, true, os.MkdirAll(path, 0o755)
+	case fi.IsDir():
+		return Link{Path: path}, false, nil
+	default:
+		// A file where a component directory belongs. Moved aside like anything
+		// else, never deleted.
+		parked, err := clear(path, stamp, scope)
+		if err != nil {
+			return Link{}, false, err
+		}
+		return Link{Path: path, Parked: parked}, true, os.MkdirAll(path, 0o755)
+	}
+}
+
+// relative names a linked path the way a person reading the output thinks of it:
+// relative to the directory the harness was applied to.
+func relative(a Applied, path string) string {
+	if a.Settings == "" {
+		return filepath.Base(path)
+	}
+	rel, err := filepath.Rel(filepath.Dir(a.Settings), path)
+	if err != nil {
+		return filepath.Base(path)
+	}
+	return rel
+}
+
+// component is which part of a harness a path belongs to.
+func component(a Applied, path string) string {
+	return strings.SplitN(relative(a, path), string(os.PathSeparator), 2)[0]
 }
 
 // scopeSlug makes a scope usable as a directory name.

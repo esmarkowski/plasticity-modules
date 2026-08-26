@@ -24,8 +24,14 @@ const usage = `plst harness — interchangeable sets of agent configuration
   plst harness update <name>            pull it
   plst harness remove <name>            delete it
 
+  plst harness pin <owner>/<repo>[@ref]  record the harness this repository expects
+  plst harness sync                      install, move to the pinned ref, apply
+
   --project   act on this repository's .claude instead of the agent's own.
               Rules only work here: the agent never reads them from user scope.
+
+A pin lives in plst.json and is committed, so every clone and every worktree of a
+repository gets the same harness at the same ref. Syncing is safe to run twice.
 `
 
 func main() {
@@ -51,6 +57,10 @@ func main() {
 		os.Exit(update(args))
 	case "remove", "uninstall":
 		os.Exit(remove(args))
+	case "pin":
+		os.Exit(pin(args))
+	case "sync":
+		os.Exit(sync(args))
 	case manifestFlag:
 		os.Exit(manifest())
 	case "--version", "version":

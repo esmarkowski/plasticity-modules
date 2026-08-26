@@ -28,10 +28,39 @@ const ManifestFile = "harness.json"
 // names a path is a hook command that works on one machine.
 const RootVar = "${HARNESS_ROOT}"
 
+// LinkMode is how a harness's directory components meet whatever the agent's
+// directory already holds.
+type LinkMode string
+
+const (
+	// Merge links each entry into the directory, leaving the directory itself
+	// real. A repository keeps its own committed agents and skills, and the
+	// harness's sit beside them.
+	Merge LinkMode = "merge"
+	// Replace links the directory itself, so what the harness provides is exactly
+	// what the agent reads and anything already there is parked. Right for a
+	// personal harness at user scope, which is meant to be the whole of it.
+	Replace LinkMode = "replace"
+)
+
+// Mode is how this harness links, defaulting to merge.
+//
+// Merge is the default because it is the one that cannot displace a file someone
+// committed. Replace hides entries the harness has never heard of, which is
+// wanted for a personal harness and wrong for a project's.
+func (m Manifest) Mode() LinkMode {
+	if m.Link == "" {
+		return Merge
+	}
+	return m.Link
+}
+
 // Manifest is what a harness declares.
 type Manifest struct {
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
+	// Link is merge or replace. Empty means merge.
+	Link LinkMode `json:"link,omitempty"`
 	// Hooks are declared in the same shape the agent's settings file uses, so a
 	// harness author writes what they already know and plst does not invent a
 	// second dialect for the same thing.
@@ -56,6 +85,11 @@ func LoadManifest(dir string) (Manifest, error) {
 	}
 	if read.Name == "" {
 		read.Name = m.Name
+	}
+	// Refused rather than defaulted. A typo here decides whether a repository's
+	// committed configuration gets moved aside, so it is not a thing to guess at.
+	if read.Link != "" && read.Link != Merge && read.Link != Replace {
+		return m, fmt.Errorf("%s: link is %q, want %q or %q", ManifestFile, read.Link, Merge, Replace)
 	}
 	return read, nil
 }

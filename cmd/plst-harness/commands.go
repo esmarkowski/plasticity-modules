@@ -141,6 +141,14 @@ func newHarness(args []string) int {
 func use(args []string) int {
 	name := positional(args)
 	if name == "" {
+		// A repository that pins one has already answered the question, so say so
+		// rather than making someone look the name up.
+		if wd, err := os.Getwd(); err == nil {
+			if _, ok, _ := harness.LoadPin(repoRoot(wd)); ok {
+				ui.Fail(os.Stderr, fmt.Errorf("this repository pins a harness — `plst harness sync` applies it"))
+				return 2
+			}
+		}
 		ui.Fail(os.Stderr, fmt.Errorf("usage: plst harness use <name> [--project]"))
 		return 2
 	}
@@ -243,6 +251,12 @@ func printContents(h harness.Harness) {
 		}
 		fmt.Printf("    %s%s\n", ui.Pad(c.Name, 14), note)
 	}
+	// Merge is the default and displaces nothing, so replace is the mode worth
+	// naming: it hides whatever the agent's directory already held.
+	if h.Manifest.Mode() == harness.Replace {
+		fmt.Println("    " + ui.Warn.Render("link: replace") +
+			ui.Desc.Render(" — directories are linked whole; anything already there is parked"))
+	}
 }
 
 func update(args []string) int {
@@ -293,6 +307,68 @@ func remove(args []string) int {
 	}
 	ui.Done(os.Stdout, "removed "+name)
 	return 0
+}
+
+func pin(args []string) int {
+	ref := positional(args)
+	if ref == "" {
+		ui.Fail(os.Stderr, fmt.Errorf("usage: plst harness pin <owner>/<repo>[@ref]"))
+		return 2
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		ui.Fail(os.Stderr, err)
+		return 1
+	}
+	root := repoRoot(wd)
+	p, err := harness.SetPin(root, ref)
+	if err != nil {
+		ui.Fail(os.Stderr, err)
+		return 1
+	}
+	ui.Done(os.Stdout, "pinned "+p.Source)
+	fmt.Println("  " + ui.Note.Render(filepath.Join(root, harness.PinFile)))
+	if p.Ref == "" {
+		// Worth saying: without one, two developers who sync a month apart get
+		// different harnesses and nothing tells them so.
+		fmt.Println("  " + ui.Warn.Render("no ref") +
+			ui.Desc.Render(" — pin one (@v1, @sha) so every checkout gets the same version"))
+	}
+	fmt.Println(ui.Desc.Render("  commit it, then ") + ui.Name.Render("plst harness sync"))
+	return 0
+}
+
+func sync(args []string) int {
+	wd, err := os.Getwd()
+	if err != nil {
+		ui.Fail(os.Stderr, err)
+		return 1
+	}
+	root := repoRoot(wd)
+	rep, err := harness.Sync(root, say)
+	if err != nil {
+		ui.Fail(os.Stderr, err)
+		return 1
+	}
+	ui.Done(os.Stdout, fmt.Sprintf("%s applied at %s", rep.Harness, rep.Scope.Label()))
+	fmt.Println("  " + ui.Desc.Render("pinned   ") + rep.Pin.Source + refSuffix(rep.Pin.Ref))
+	fmt.Println("  " + ui.Desc.Render("harness  ") + rep.Action)
+	if len(rep.Linked) > 0 {
+		fmt.Println("  " + ui.Desc.Render("linked   ") + strings.Join(rep.Linked, ", "))
+	}
+	if len(rep.Parked) > 0 {
+		fmt.Println("  " + ui.Warn.Render("moved    ") + strings.Join(rep.Parked, ", ") +
+			ui.Desc.Render(" — what was there is kept, not deleted"))
+	}
+	fmt.Println(ui.Note.Render("  takes effect in sessions started from here on"))
+	return 0
+}
+
+func refSuffix(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	return " @ " + ref
 }
 
 func settingsFor(scope harness.Scope) string {
